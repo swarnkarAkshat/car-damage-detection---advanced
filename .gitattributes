@@ -1,0 +1,2 @@
+# Track PyTorch model files using Git LFS (Large File Storage)
+*.pth filter=lfs diff=lfs merge=lfs -text

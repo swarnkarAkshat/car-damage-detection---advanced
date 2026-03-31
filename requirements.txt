@@ -1,0 +1,10 @@
+# Recommended: Use the CPU-only package of PyTorch for cloud deployments like Render.
+# This prevents the deployment from running out of RAM (OOM) while installing massive GPU binaries!
+--extra-index-url https://download.pytorch.org/whl/cpu
+
+fastapi
+uvicorn
+torch
+torchvision
+pillow
+python-multipart

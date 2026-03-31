@@ -1,0 +1,20 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Node modules (from your frontend app if keeping in the same repo)
+frontend/node_modules/
+frontend/dist/
+
+# OS hidden files
+.DS_Store
+Thumbs.db
