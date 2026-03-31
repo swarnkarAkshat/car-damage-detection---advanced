@@ -1,17 +1,19 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import os
+import io
+import logging
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-import torchvision.models as models
-from torchvision import transforms
+from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from torchvision import models, transforms
 from PIL import Image
-import io
-import os
 
-# 5. Ensure FastAPI app is defined cleanly
-app = FastAPI()
+# 1. Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
+# 2. Initialize FastAPI
+app = FastAPI(title="Car Damage Classification API")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -20,7 +22,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 3. Define the model class directly inside main.py using ResNet50
+# 3. Path Configuration
+# This ensures it always uses the exact same folder as main.py
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Check multiple common paths for the model
+potential_paths = [
+    os.path.join(BASE_DIR, "saved_model.pth"),
+    os.path.join(BASE_DIR, "saved_model", "saved_model.pth")
+]
+
+MODEL_PATH = potential_paths[0]
+for path in potential_paths:
+    if os.path.exists(path):
+        MODEL_PATH = path
+        break
+
+# 4. Global Variables
+model = None
+model_loaded = False  # Boolean variable tracking success
+device = torch.device("cpu")
+
+CLASSES = [
+    "F_Breakage", 
+    "F_Crushed", 
+    "F_Normal", 
+    "R_Breakage", 
+    "R_Crushed", 
+    "R_Normal"
+]
+
+transform = transforms.Compose([
+    transforms.Resize((224, 224)),
+    transforms.ToTensor(),
+    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+])
+
 class CarClassifierResNet(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
@@ -33,69 +70,103 @@ class CarClassifierResNet(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-CLASS_NAMES = ["F_Breakage", "F_Crushed", "F_Normal", "R_Breakage", "R_Crushed", "R_Normal"]
-model = CarClassifierResNet(num_classes=6)
+# 5. Model Loading Logic
+def load_app_model():
+    global model, model_loaded
+    
+    # Print debug logs
+    logger.info("=== STARTING MODEL LOAD ===")
+    logger.info(f"Current Directory: {os.getcwd()}")
+    try:
+        logger.info(f"Files in directory: {os.listdir(BASE_DIR)}")
+    except Exception as e:
+        logger.error(f"Could not list files: {e}")
+    logger.info(f"Using Model Path: {MODEL_PATH}")
+    logger.info("===========================")
 
-# 4. Load model weights using file path ONLY, defaulting map_location to CPU
-try:
-    # Explicitly using the user's requested path exactly.
-    # Note: If running locally inside the saved_model folder, this path resolving as "saved_model/saved_model.pth" 
-    # might fail if it's actually "./saved_model.pth", but this perfectly mirrors their requested Render structure!
-    model.load_state_dict(torch.load("saved_model/saved_model.pth", map_location="cpu"))
-    model.eval()
-    print("Model loaded successfully!")
-except Exception as e:
-    print(f"Warning: Failed to load model weights: {e}")
+    if not os.path.exists(MODEL_PATH):
+        logger.warning(f"{MODEL_PATH} not found! Predictions will not work.")
+        model_loaded = False
+        return
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
-])
+    try:
+        # Load the CarClassifierResNet framework
+        logger.info("Setting up CarClassifierResNet...")
+        base_model = CarClassifierResNet(num_classes=len(CLASSES))
+        
+        # Load weights from file
+        logger.info("Loading weights from disk...")
+        state_dict = torch.load(MODEL_PATH, map_location=device)
+        
+        # Clean state_dict if it is wrapped in a checkpoint dictionary
+        if isinstance(state_dict, dict) and ('state_dict' in state_dict or 'model_state_dict' in state_dict):
+            state_dict = state_dict.get('state_dict', state_dict.get('model_state_dict'))
 
-# 6. Add a root endpoint
+        # Load weights into the architecture
+        logger.info("Applying state_dict...")
+        base_model.load_state_dict(state_dict)
+        
+        # Assign to global model & finalize prep
+        model = base_model.to(device)
+        model.eval()
+        
+        model_loaded = True
+        logger.info("✅ Model loaded successfully!")
+        
+    except Exception as e:
+        logger.exception(f"❌ Error loading model: {e}")
+        model_loaded = False
+        model = None
+
+# Attempt to load right away
+load_app_model()
+
+# 6. API Endpoints
 @app.get("/")
-def home():
-    return {"message": "API running"}
+def read_root():
+    return {"message": "Car Damage Classification API is running!"}
 
 @app.get("/health")
 def health_check():
-    return {"status": "API is running"}
+    return {
+        "status": "Healthy",
+        "model_loaded": model_loaded,
+        "model_path_checked": MODEL_PATH
+    }
 
 @app.get("/classes")
 def get_classes():
-    return CLASS_NAMES
+    return {"classes": CLASSES}
 
-# 7. Keep existing endpoints like /predict working
 @app.post("/predict")
 async def predict_image(file: UploadFile = File(...)):
+    if not model_loaded or model is None:
+        raise HTTPException(status_code=503, detail="Model is not loaded.")
+    
     if not file.content_type.startswith("image/"):
-        raise HTTPException(status_code=400, detail="The uploaded file must be an image.")
+        raise HTTPException(status_code=400, detail="Must upload an image file.")
 
     try:
-        contents = await file.read()
-        image = Image.open(io.BytesIO(contents)).convert('RGB')
+        image_bytes = await file.read()
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
         
-        input_tensor = transform(image)
-        # Squeeze batch dimension, already explicitly forced to CPU above
-        input_batch = input_tensor.unsqueeze(0).to("cpu")
+        input_tensor = transform(image).unsqueeze(0).to(device)
         
         with torch.no_grad():
-            output = model(input_batch)
+            output = model(input_tensor)
             
-        probabilities = F.softmax(output[0], dim=0)
-        confidence, predicted_idx = torch.max(probabilities, 0)
+        probabilities = torch.nn.functional.softmax(output[0], dim=0)
+        max_prob, predicted_idx = torch.max(probabilities, 0)
         
         return {
-            "prediction": CLASS_NAMES[predicted_idx.item()],
-            "confidence": round(confidence.item(), 4)
+            "prediction": CLASSES[predicted_idx.item()],
+            "confidence": float(max_prob.item())
         }
         
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed processing the image: {str(e)}")
+        logger.error(f"Error during prediction: {e}")
+        raise HTTPException(status_code=500, detail="Prediction failed.")
 
-# 8. Ensure the app runs with uvicorn
 if __name__ == "__main__":
     import uvicorn
-    port = int(os.environ.get("PORT", 10000))
-    uvicorn.run("main:app", host="0.0.0.0", port=port)
+    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8000)))
