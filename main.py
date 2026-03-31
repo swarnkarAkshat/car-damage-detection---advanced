@@ -9,10 +9,9 @@ from PIL import Image
 import io
 import os
 
-# 3. Ensure the FastAPI app is defined cleanly for deployment
+# 5. Ensure FastAPI app is defined cleanly
 app = FastAPI()
 
-# Add CORS middleware to allow all origins
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -21,7 +20,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Define the ResNet50 model architecture
+# 3. Define the model class directly inside main.py using ResNet50
 class CarClassifierResNet(nn.Module):
     def __init__(self, num_classes):
         super().__init__()
@@ -34,37 +33,30 @@ class CarClassifierResNet(nn.Module):
     def forward(self, x):
         return self.model(x)
 
-# Setup Environment
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 CLASS_NAMES = ["F_Breakage", "F_Crushed", "F_Normal", "R_Breakage", "R_Crushed", "R_Normal"]
+model = CarClassifierResNet(num_classes=6)
 
-# Absolute path to model - immune to cloud directory shifting
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(BASE_DIR, "saved_model.pth")
-
+# 4. Load model weights using file path ONLY, defaulting map_location to CPU
 try:
-    print(f"Loading model from: {MODEL_PATH}")
-    model = CarClassifierResNet(num_classes=6)
-    model.load_state_dict(torch.load(MODEL_PATH, map_location=DEVICE, weights_only=True))
-    model.to(DEVICE)
+    # Explicitly using the user's requested path exactly.
+    # Note: If running locally inside the saved_model folder, this path resolving as "saved_model/saved_model.pth" 
+    # might fail if it's actually "./saved_model.pth", but this perfectly mirrors their requested Render structure!
+    model.load_state_dict(torch.load("saved_model/saved_model.pth", map_location="cpu"))
     model.eval()
     print("Model loaded successfully!")
 except Exception as e:
     print(f"Warning: Failed to load model weights: {e}")
 
-# Preprocessing
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# ----- API Endpoints -----
-
-# 4. Ensure there is a root endpoint named home
+# 6. Add a root endpoint
 @app.get("/")
 def home():
-    return {"message": "API is running"}
+    return {"message": "API running"}
 
 @app.get("/health")
 def health_check():
@@ -74,7 +66,7 @@ def health_check():
 def get_classes():
     return CLASS_NAMES
 
-# 6. Do NOT break existing /predict endpoint
+# 7. Keep existing endpoints like /predict working
 @app.post("/predict")
 async def predict_image(file: UploadFile = File(...)):
     if not file.content_type.startswith("image/"):
@@ -85,7 +77,8 @@ async def predict_image(file: UploadFile = File(...)):
         image = Image.open(io.BytesIO(contents)).convert('RGB')
         
         input_tensor = transform(image)
-        input_batch = input_tensor.unsqueeze(0).to(DEVICE)
+        # Squeeze batch dimension, already explicitly forced to CPU above
+        input_batch = input_tensor.unsqueeze(0).to("cpu")
         
         with torch.no_grad():
             output = model(input_batch)
@@ -101,9 +94,8 @@ async def predict_image(file: UploadFile = File(...)):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed processing the image: {str(e)}")
 
-# 5. Make sure the app can run properly using uvicorn main:app
+# 8. Ensure the app runs with uvicorn
 if __name__ == "__main__":
     import uvicorn
-    # Secure bindings defaulting strictly to 0.0.0.0 and port 10000 for Render integration
     port = int(os.environ.get("PORT", 10000))
     uvicorn.run("main:app", host="0.0.0.0", port=port)
